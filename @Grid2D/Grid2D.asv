@@ -1,0 +1,280 @@
+classdef Grid2D < handle
+
+% -----------------------------------------------------------------------------
+%                          PROPERTIES SECTION
+% -----------------------------------------------------------------------------
+
+properties ( Access = public )
+	file_;  % file containing grid information
+	nodes_; % structure containing the list of nodes
+	nodePtrs_; %
+	edgePtrs_; %
+	edges_; % structure containing the list of edges
+	cells_; % structure containing the list of cells
+	bndry_; % 4 x numBndryEdges (uint32): list of boundary edges
+	dg_;    % structure containing dg connectivity
+end
+
+
+% -----------------------------------------------------------------------------
+%                         STATIC METHODS SECTION
+% -----------------------------------------------------------------------------
+
+methods (Static)
+
+	[tag] = getDirichletTag();
+	[tag] = getNeumannTag();
+	[tag] = getRobinTag();
+
+end
+
+% -----------------------------------------------------------------------------
+%                          METHODS SECTION
+% -----------------------------------------------------------------------------
+methods
+
+%{	
+function G = Grid2D(gridFile)
+% ----------------------------------------------------------------------------
+% Constructor:
+%
+% Grid2D(gridFile) gridFile is a binary file with grid information.
+% 
+% ----------------------------------------------------------------------------
+
+	% ----------------------- reading grid file ------------------------------
+	G.file_ = gridFile;
+	fid = fopen(gridFile,'r');
+	fprintf('Reading grid file "%s" ...\n',gridFile);
+	% -------------------- READ VERTEX GEOMETRY ------------------------------
+	G.nodes_.numNodes_ = fread(fid,[1 1],'*double');
+	G.nodes_.xList_  = fread(fid,[2 G.nodes_.numNodes_],'*double');
+	% -------------------- READ CELL CONNECTIVITY ----------------------------
+	G.cells_.numCells_ = fread(fid,[1 1],'*double');
+	G.cells_.vList_ = fread(fid,[3 G.cells_.numCells_],'*uint32');
+	G.cells_.eList_ = fread(fid,[3 G.cells_.numCells_],'*uint32');
+	G.cells_.mList_ = fread(fid,[1 G.cells_.numCells_],'*uint32');
+	% -------------------- READ EDGE CONNECTIVITY ----------------------------
+	G.edges_.numEdges_ = fread(fid,[1 1],'*double');
+	G.edges_.vList_ = fread(fid,[2 G.edges_.numEdges_],'*uint32');
+	G.edges_.nList_ = fread(fid,[2 G.edges_.numEdges_],'*uint32');
+	G.edges_.sList_ = fread(fid,[2 G.edges_.numEdges_],'*uint8');
+	G.edges_.hdgID_ = fread(fid,[1 G.edges_.numEdges_],'*uint32');
+	G.edges_.length_ = zeros(1,G.edges_.numEdges_);
+	G.edges_.numHdgEdges_ = max(G.edges_.hdgID_);
+	G.edges_.globalHdgID_ = zeros(1,G.edges_.numHdgEdges_,'uint32');
+
+	% ------------------- READ BOUNDARY EDGE CONNECTIVITY --------------------
+	G.bndry_.numEdges_ = fread(fid,[1 1],'*double');
+	G.bndry_.eList_ = [];
+	G.bndry_.bType_ = [];
+	if G.bndry_.numEdges_ > 0
+		G.bndry_.eList_ = fread(fid,[1 G.bndry_.numEdges_],'*uint32');
+		numTags = fread(fid,[1 1], '*double');
+		G.bndry_.bType_ = fread(fid,[1 numTags],'*uint8');
+	end
+	fclose(fid);
+	% ------------------------------------------------------------------------
+	%          PROCESS SOME ADDITIONAL CONNECTIVITY INFORMATION
+	% ------------------------------------------------------------------------
+	G.nodePtrs_ = getNodeFlags(G);
+	G.edgePtrs_ = getEdgeFlags(G);
+	disp('Processing additional connectivity information ... ')
+	G.dg_.eList_ = zeros(3,G.cells_.numCells_,'uint32');
+	G.dg_.nList_ = zeros(3,G.cells_.numCells_,'uint32');
+	G.dg_.sList_ = zeros(3,G.cells_.numCells_,'uint8');
+	G.dg_.rList_ = zeros(3,G.cells_.numCells_,'uint8');
+	for iCell = 1:G.cells_.numCells_
+		for iSide = 1:3
+			iEdge = G.cells_.eList_(iSide,iCell);
+			G.dg_.eList_(iSide,iCell) = G.edges_.hdgID_(iEdge);
+			if G.edges_.nList_(1,iEdge) == iCell
+				G.dg_.nList_(iSide,iCell) = G.edges_.nList_(2,iEdge);
+				G.dg_.sList_(iSide,iCell) = G.edges_.sList_(2,iEdge);
+				G.dg_.rList_(iSide,iCell) = 0; % POSITIVE ORIENTATION
+			else
+				G.dg_.nList_(iSide,iCell) = G.edges_.nList_(1,iEdge);
+				G.dg_.sList_(iSide,iCell) = G.edges_.sList_(1,iEdge);
+				G.dg_.rList_(iSide,iCell) = 1; % OPPOSITE ORIENTATION
+			end
+		end
+	end
+	numEdges = G.edges_.numEdges_;
+	for k = 1:numEdges,
+		i1 = G.edges_.vList_(1,k);
+		i2 = G.edges_.vList_(2,k);
+		G.edges_.length_(k) = norm(G.nodes_.xList_(:,i2) - ...
+								G.nodes_.xList_(:,i1));
+    end
+end
+%}
+
+function G = Grid2D(p, e, t)
+% ----------------------------------------------------------------------------
+% Constructor:
+%
+% Grid2D(gridFile) gridFile is a binary file with grid information.
+% 	DIRICHLET = 1;
+%	INITIAL_TIME   = 2;
+%	FINAL_TIME     = 3;
+%	OTHER     = 4;
+% ----------------------------------------------------------------------------
+	numNodes = size(p, 2);
+	numCells = size(t, 2);
+	numEdges = numCells + numNodes - 1;
+	% ----------------------- reading grid file ------------------------------
+	
+	G.nodes_.numNodes_ = numNodes;
+	G.nodes_.xList_  = p;
+	% -------------------- READ CELL CONNECTIVITY ----------------------------
+	G.cells_.numCells_ = numCells;
+	G.cells_.vList_ = t(1: 3, :);
+	G.edges_.numEdges_ = numEdges;
+	G.cells_.eList_ = zeros(3, numCells);
+	G.edges_.vList_ = zeros(2, numEdges);
+	G.edges_.length_ = zeros(numEdges, 1);
+	G.edges_.nList_ = zeros(2, numEdges);
+	G.edges_.sList_ = zeros(2, numEdges);
+	rMap = [2, 3, 1];
+	3, 2, 1
+	mapEdges = sparse(numNodes, numNodes);
+	contE = 1;
+	for iT = 1 : numCells
+		for jE = 1 : 3
+			v1 = t(jE, iT);
+			v2 = t(rMap(jE), iT);
+			if(mapEdges(v1, v2) ~= 0)
+				G.cells_.eList_(jE, iT) = mapEdges(v1, v2);
+				ePtr = mapEdges(v1, v2);
+				G.edges_.nList_(2, ePtr) = iT;
+				G.edges_.sList_(2, ePtr) = jE;
+			elseif(mapEdges(v2, v1) ~= 0)
+				G.cells_.eList_(jE, iT) = mapEdges(v2, v1);
+				ePtr = mapEdges(v2, v1);
+				G.edges_.nList_(2, ePtr) = iT;
+				G.edges_.sList_(2, ePtr) = jE;
+			else
+				G.cells_.eList_(jE, iT) = contE;
+				G.edges_.vList_(:, contE) = [v1; v2];
+				G.edges_.length_(contE) = norm(p(:, v1) - p(:, v2));
+				mapEdges(v1, v2) = contE;
+				G.edges_.nList_(1, contE) = iT;
+				G.edges_.sList_(1, contE) = jE;
+				contE = contE + 1;
+			end
+		end
+	end
+
+	G.edges_.hdgID_ = zeros(1, numEdges);
+	hdgEdgeCounter = 0;
+	for iEdge = 1 : numEdges
+		if G.edges_.sList_(2, iEdge) > 0
+			hdgEdgeCounter = hdgEdgeCounter + 1;
+			G.edges_.hdgID_(iEdge) = hdgEdgeCounter;
+		end
+	end
+	G.cells_.mList_ = t(4, :);
+	% -------------------- READ EDGE CONNECTIVITY ----------------------------
+
+	% ------------------- READ BOUNDARY EDGE CONNECTIVITY --------------------
+	nBndryEdges = size(e, 2);
+	G.bndry_.numEdges_ = nBndryEdges;
+	G.bndry_.eList_ = zeros(nBndryEdges, 1);
+	G.bndry_.bType_ = zeros(nBndryEdges, 1);
+	for jE = 1 : nBndryEdges
+		v1 = e(1, jE);
+		v2 = e(2, jE);
+		if(abs(p(2, v1)) < 1.0e-12 && abs(p(2, v2)) < 1.0e-12)
+			G.bndry_.bType_(jE) = 2;
+		elseif(abs(p(1, v1) - 1.0) < 1.0e-12 && abs(p(1, v2) - 1.0) < 1.0e-12)
+			G.bndry_.bType_(jE) = 1;
+		elseif(abs(p(2, v1) - 1.0) < 1.0e-12 && abs(p(2, v2) - 1.0) < 1.0e-12)
+			G.bndry_.bType_(jE) = 3;
+		elseif(abs(p(1, v1)) < 1.0e-12 && abs(p(1, v2)) < 1.0e-12)
+			G.bndry_.bType_(jE) = 1;
+		end
+		for s = 1 : numEdges
+			vs1 = G.edges_.vList_(1, s);
+			vs2 = G.edges_.vList_(2, s);
+			if(v1 == vs1 && v2 == vs2)
+				G.bndry_.eList_(jE) = s;
+				G.edges_.nList_(2, s) = G.bndry_.bType_(jE);
+				break
+			end
+		end
+	end
+	[G.bndry_.eList_, I] = sort(G.bndry_.eList_);
+	G.bndry_.bType_ = G.bndry_.bType_(I);
+	% ------------------------------------------------------------------------
+	%          PROCESS SOME ADDITIONAL CONNECTIVITY INFORMATION
+	% ------------------------------------------------------------------------
+	G.nodePtrs_ = getNodeFlags(G);
+	G.edgePtrs_ = getEdgeFlags(G);
+	disp('Processing additional connectivity information ... ')
+	G.dg_.eList_ = zeros(3,G.cells_.numCells_,'uint32');
+	G.dg_.nList_ = zeros(3,G.cells_.numCells_,'uint32');
+	G.dg_.sList_ = zeros(3,G.cells_.numCells_,'uint8');
+	G.dg_.rList_ = zeros(3,G.cells_.numCells_,'uint8');
+
+	for iCell = 1:G.cells_.numCells_
+		for iSide = 1:3
+			iEdge = G.cells_.eList_(iSide, iCell);
+			G.dg_.eList_(iSide, iCell) = G.edges_.hdgID_(iEdge);
+			if G.edges_.nList_(1, iEdge) == iCell
+				G.dg_.nList_(iSide,iCell) = G.edges_.nList_(2,iEdge);
+				G.dg_.sList_(iSide,iCell) = G.edges_.sList_(2,iEdge);
+				G.dg_.rList_(iSide,iCell) = 0; % POSITIVE ORIENTATION
+			else
+				G.dg_.nList_(iSide,iCell) = G.edges_.nList_(1,iEdge);
+				G.dg_.sList_(iSide,iCell) = G.edges_.sList_(1,iEdge);
+				G.dg_.rList_(iSide,iCell) = 1; % OPPOSITE ORIENTATION
+			end
+		end
+	end
+
+end
+
+
+	[numNodes] = getNumNodes(G);
+	[node] = getNode(G, kNode);
+	[numCells] = getNumCells(G);
+	[materialId] = getMaterialId(G, kCell);
+	[numEdges] = getNumEdges(G);
+	[numEdges] = getNumInteriorEdges(G);
+	[numEdges] = getNumBoundaryEdges(G);
+	[] = getSimplex(G, kCell, T);
+	[] = getCell(G, kCell, cell);
+	[numInteriorNodes] = getNumInteriorNodes(G);
+	[numBndryNodes] = getNumBndryNodes(G);
+	[nodesPtrs] = getNodePtrs(G);
+	[edgePtrs] = getEdgePtrs(G);
+	nodePtrs = getNodeFlags(G);
+	edgePtrs = getEdgeFlags(G);
+	[hmin, hmax] = getGridSize(G);
+	[QM] = evalQualityMeasures(G);
+	[] = plot(G,varargin);
+
+end					% END OF METHOD SECTION
+
+% -----------------------------------------------------------------------------
+%                          END OF CLASS DEFINITION
+% -----------------------------------------------------------------------------
+end
+
+% ------------------------------------------------------------------------------
+%                               END OF FILE
+% ------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+% -----------------------------------------------------------------------------
+%                             Created by S. Gomez
+%                          Department of Mathematics
+%                         University of Pavia, Italia
+%                                   (2020)
+% -----------------------------------------------------------------------------
